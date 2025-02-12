@@ -1,0 +1,23 @@
+[Cursor] Initial commit - LangChainEcom Project
+
+Key features:
+- Telegram bot integration
+- WooCommerce agent
+- DeepSeek AI integration
+- Advanced logging system
+- Caching mechanism
+- Error handling
+
+Technical stack:
+- Python 3.8+
+- python-telegram-bot v21.10
+- langchain v0.1.9
+- WooCommerce API v3.0
+- FastAPI (ready for future use)
+
+Project structure:
+- Modular architecture
+- Clean code practices
+- Full documentation
+- Environment configuration
+- Logging system 

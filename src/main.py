@@ -51,29 +51,38 @@ def main():
         return
 
     try:
+        logger.info("מתחיל אתחול הרכיבים...")
+        
         # Initialize WooCommerce agent
+        logger.info("מאתחל את סוכן ה-WooCommerce...")
         wc_agent = WooCommerceAgent(
             url=os.getenv("WC_STORE_URL"),
             consumer_key=os.getenv("WC_CONSUMER_KEY"),
             consumer_secret=os.getenv("WC_CONSUMER_SECRET")
         )
+        logger.info("סוכן ה-WooCommerce אותחל בהצלחה")
 
         # Initialize Orchestrator agent
+        logger.info("מאתחל את ה-Orchestrator...")
         orchestrator = OrchestratorAgent(
             deepseek_api_key=os.getenv("DEEPSEEK_API_KEY")
         )
+        logger.info("ה-Orchestrator אותחל בהצלחה")
 
         # Initialize and start the bot
+        logger.info("מאתחל את הבוט...")
         bot = StoreManagerBot(
             token=os.getenv("TELEGRAM_BOT_TOKEN"),
             orchestrator=orchestrator
         )
+        logger.info("הבוט אותחל בהצלחה")
 
-        logger.info("Starting the Ultimate Store Manager bot...")
+        logger.info("מתחיל להריץ את הבוט...")
         bot.run()
+        logger.info("הבוט הופעל בהצלחה")
 
     except Exception as e:
-        logger.error(f"Failed to start the bot: {e}")
+        logger.error(f"נכשל בהפעלת הבוט: {str(e)}", exc_info=True)
         raise
 
 if __name__ == "__main__":

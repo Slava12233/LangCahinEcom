@@ -121,25 +121,25 @@ class CustomLogger:
         
         return json.dumps(data, ensure_ascii=False)
     
-    def debug(self, message: str, extra: Optional[Dict[str, Any]] = None) -> None:
+    def debug(self, message: str, extra: Optional[Dict[str, Any]] = None, exc_info: bool = False) -> None:
         """רישום הודעת debug."""
-        self.logger.debug(self._format_message(message, extra))
+        self.logger.debug(self._format_message(message, extra), exc_info=exc_info)
     
-    def info(self, message: str, extra: Optional[Dict[str, Any]] = None) -> None:
+    def info(self, message: str, extra: Optional[Dict[str, Any]] = None, exc_info: bool = False) -> None:
         """רישום הודעת info."""
-        self.logger.info(self._format_message(message, extra))
+        self.logger.info(self._format_message(message, extra), exc_info=exc_info)
     
-    def warning(self, message: str, extra: Optional[Dict[str, Any]] = None) -> None:
+    def warning(self, message: str, extra: Optional[Dict[str, Any]] = None, exc_info: bool = False) -> None:
         """רישום הודעת warning."""
-        self.logger.warning(self._format_message(message, extra))
+        self.logger.warning(self._format_message(message, extra), exc_info=exc_info)
     
-    def error(self, message: str, extra: Optional[Dict[str, Any]] = None) -> None:
+    def error(self, message: str, extra: Optional[Dict[str, Any]] = None, exc_info: bool = False) -> None:
         """רישום הודעת error."""
-        self.logger.error(self._format_message(message, extra))
+        self.logger.error(self._format_message(message, extra), exc_info=exc_info)
     
-    def critical(self, message: str, extra: Optional[Dict[str, Any]] = None) -> None:
+    def critical(self, message: str, extra: Optional[Dict[str, Any]] = None, exc_info: bool = False) -> None:
         """רישום הודעת critical."""
-        self.logger.critical(self._format_message(message, extra))
+        self.logger.critical(self._format_message(message, extra), exc_info=exc_info)
 
 # יצירת instance יחיד של הלוגר
 def get_logger(name: str) -> CustomLogger:

@@ -102,6 +102,16 @@ If needed, you can further use the `web_scraper.py` file to scrape the web page 
 - Add debug information to stderr while keeping the main output clean in stdout for better pipeline integration
 - When using seaborn styles in matplotlib, use 'seaborn-v0_8' instead of 'seaborn' as the style name due to recent seaborn version changes
 - Use 'gpt-4o' as the model name for OpenAI's GPT-4 with vision capabilities
+- בעבודה עם DeepSeek API:
+    - יש להשתמש רק בפרמטרים הנתמכים: model, messages, temperature, max_tokens
+    - אין להשתמש בפרמטרים כמו functions, presence_penalty, frequency_penalty
+    - יש להגדיר timeout מתאים (30 שניות) ומנגנון retry למקרה של כישלון
+    - כדאי להשתמש במטמון (cache) לתשובות כדי לחסוך בקריאות API ולשפר את זמני התגובה
+- בעבודה עם בוט טלגרם:
+    - חשוב לתת תשובות מועילות גם בלי גישה למידע מהחנות
+    - יש להבהיר למשתמש מה הבוט יכול ולא יכול לעשות
+    - יש לשמור על זהות עקבית כמומחה לניהול חנות
+    - יש להשתמש באימוג'ים בצורה מדודה ומקצועית
 
 # Scratchpad
 
@@ -141,11 +151,29 @@ If needed, you can further use the `web_scraper.py` file to scrape the web page 
     [X] - התראות על שגיאות חריגות
     [X] - סטטיסטיקות שימוש
 
-### שלב 3: הרחבת הסוכן (בתהליך 🔄)
+### שלב 3: שיפור חווית המשתמש (בתהליך 🔄)
 [X] 1. שיפור הטיפול בשגיאות
     [X] - הוספת מנגנון retry
     [X] - הגדרת timeout
     [X] - טיפול במקרי קצה
+[X] 2. שיפור הפרומפטים
+    [X] - הגדרת פרומפט בסיסי ברור
+    [X] - התאמת פרומפטים לפי סוג המשימה
+    [X] - הוספת הבהרות לגבי יכולות נוכחיות ועתידיות
+[X] 3. אופטימיזציה של המטמון
+    [X] - שיפור מנגנון ה-Cache
+    [X] - הגדרת TTL מתאים
+    [X] - טיפול נכון במקרי קצה
+[ ] 4. שיפור זיהוי המשימות
+    [ ] - הרחבת מילות המפתח
+    [ ] - זיהוי הקשר שיחה
+    [ ] - טיפול בשאלות מורכבות
+
+### שלב 4: הוספת יכולות WooCommerce (מתוכנן 📋)
+[ ] 1. הגדרת פעולות בסיסיות
+    [ ] - קבלת מידע על מוצרים
+    [ ] - בדיקת סטטוס הזמנות
+    [ ] - הפקת דוחות מכירה
 [ ] 2. הוספת LangChain Agent
     [ ] - הגדרת Tools ל-WooCommerce
     [ ] - יצירת פרומפטים חכמים
@@ -154,29 +182,19 @@ If needed, you can further use the `web_scraper.py` file to scrape the web page 
     [ ] - בדיקות יחידה
     [ ] - בדיקות אינטגרציה
 
-### הערות:
-- נשתמש בפייתון טלגרם בוט גרסה 20+
-- נתחיל עם תשתית בסיסית ונרחיב בהדרגה
-- נשמור על מבנה מודולרי שיאפשר הרחבה קלה בהמשך
-- חשוב לשמור על לוגים מפורטים לצורך דיבוג ומעקב
+### הערות חשובות:
+1. הבוט כרגע עובד ומסוגל:
+   - לענות על שאלות כלליות בנושא ניהול חנות
+   - להסביר את יכולותיו הנוכחיות והעתידיות
+   - לתת תשובות מקצועיות גם בלי גישה למידע מהחנות
 
-### לקחים:
-- השתמשנו בגרסה ישנה יותר של pydantic (1.10.7) כדי להימנע מהצורך בהתקנת Rust
-- יש להקפיד על תאימות בין הגרסאות של החבילות השונות
-- קובץ ה-.env צריך להיות בתיקייה הראשית של הפרויקט
-- כל רכיב חדש שמתווסף למערכת חייב להשתמש במערכת הלוגים המרכזית עם:
-    - שימוש ב-CustomLogger דרך get_logger
-    - לוגים ברמות שונות (DEBUG, INFO, WARNING, ERROR)
-    - תיעוד פעולות עיקריות ושגיאות
-    - הוספת מידע הקשרי (מזהה שיחה, מזהה משתמש, פרמטרים רלוונטיים)
-    - הסתרת מידע רגיש בלוגים (למשל, טוקנים ומפתחות API)
-- בעבודה עם python-telegram-bot, כל הפונקציות שמתקשרות עם הבוט חייבות להיות אסינכרוניות:
-    - שימוש ב-async/await בפונקציות
-    - שימוש בספריות אסינכרוניות (למשל aiohttp במקום requests)
-    - טיפול נכון בשגיאות אסינכרוניות
-- בעבודה עם DeepSeek API:
-    - יש להשתמש רק בפרמטרים הנתמכים: model, messages, temperature, max_tokens
-    - אין להשתמש בפרמטרים כמו functions, presence_penalty, frequency_penalty
-    - מומלץ להשתמש במודל deepseek-chat-instruct במקום deepseek-chat לתוצאות יותר יציבות
-    - יש להגדיר timeout מתאים (30 שניות) ומנגנון retry למקרה של כישלון
-    - כדאי להשתמש במטמון (cache) לתשובות כדי לחסוך בקריאות API ולשפר את זמני התגובה
+2. נקודות לשיפור:
+   - שיפור זיהוי סוג המשימה
+   - הוספת יכולות אינטגרציה עם WooCommerce
+   - הוספת בדיקות אוטומטיות
+   - שיפור הטיפול בשיחות ארוכות
+
+3. תובנות מהפיתוח:
+   - חשוב לשמור על איזון בין תשובות מהירות לתשובות מדויקות
+   - המטמון עוזר לשפר ביצועים אבל צריך להיזהר מתשובות לא רלוונטיות
+   - הפרומפטים צריכים להיות ברורים וממוקדים
