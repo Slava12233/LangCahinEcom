@@ -1,0 +1,228 @@
+כדי להתחיל לפתח את הפרויקט – ובפרט כשאתה עובד ב-Cursor – מומלץ להקים תחילה מבנה מינימלי שמאפשר לך:
+
+להגדיר את סביבת הפיתוח (תלויית פייתון, ספריות, וכו').
+ליצור קובץ ראשי שמכיל בוט טלגרם בסיסי (או לפחות תשתית התחלתית).
+לשלב Agent בסיסי מ-LangChain שמסוגל "לקבל שאלות" ולהחזיר תשובות.
+להלן השלבים המעשיים הראשונים:
+
+1. הקמת פרויקט חדש והגדרת requirements.txt
+פתח פרויקט חדש ב-Cursor
+
+צור תיקייה ייעודית (למשל ultimate_store_manager).
+צור קובץ requirements.txt (או pyproject.toml / Pipfile, מה שנוח לך) עם הספריות הבסיסיות:
+
+text
+Copy
+Edit
+langchain==0.0.XXX
+python-telegram-bot==20.3
+requests==2.31.0
+pydantic==1.10.7
+# אם תרצה גם FastAPI או ספריות אחרות:
+fastapi==0.95.2
+uvicorn==0.22.0
+# ספריות LLM (אם תשתמש ב-OpenAI, DeepSeek, וכו'):
+openai==0.27.6
+הערה: גרסאות הן דוגמאות – אתה יכול לבדוק את הגרסה העדכנית.
+
+התקנת החבילות
+
+ב-Cursor: אם אתה משתמש ב-Terminal המשולב, תריץ:
+bash
+Copy
+Edit
+pip install -r requirements.txt
+או בצע דרך הממשק הגרפי ב-Cursor, אם הוא מאפשר זאת.
+2. יצירת מבנה קבצים ראשוני
+כדי לשמור על סדר, אפשר לבנות מבנה מינימלי כזה:
+
+bash
+Copy
+Edit
+ultimate_store_manager/
+  ├── requirements.txt
+  ├── src/
+  │    ├── main.py               # נקודת כניסה עיקרית (הפעלה)
+  │    ├── bot.py                # מכיל את הקוד לבוט הטלגרם
+  │    ├── agents/
+  │    │    ├── orchestrator.py  # הסוכן הראשי (Orchestrator)
+  │    │    ├── woocommerce_agent.py  # סוכן אחראי על פעולות/מידע מוורדפרס
+  │    │    └── research_agent.py     # סוכן מחקר (אופציונלי בשלב זה)
+  └── .env.example
+main.py: נקודת ריצה שמאתחלת הכל (כולל בוט טלגרם, סוכנים, וכו').
+bot.py: הגדרות בוט טלגרם + ה-Handlers לשיחות.
+agents/: תיקייה שבה נגדיר את הסוכנים. בשלב ראשון מספיק Orchestrator וסוכן אחד (WooCommerce), ובהמשך נוסיף סוכן מחקר וכו'.
+.env.example: קובץ דוגמה להגדיר מפתחות API, טוקן של טלגרם וכו'. (לא מעלים את הגרסה האמיתית ל-Git).
+3. הגדרת משתני סביבה (ב-.env)
+כדי לשמור על סודיות (מפתחות API וכו'), כדאי להשתמש בקובץ .env. לדוגמה:
+
+ini
+Copy
+Edit
+TELEGRAM_BOT_TOKEN="123456:ABC-foobar"
+WC_CONSUMER_KEY="ck_xxx"
+WC_CONSUMER_SECRET="cs_xxx"
+WC_STORE_URL="https://example.com"
+OPENAI_API_KEY="sk-xxxx"
+אל תשכח להכניס את הקובץ .env ל-.gitignore שלא יעלה לריפו ציבורי.
+
+4. כתיבת הבוט הראשוני (bot.py)
+כדוגמה עם python-telegram-bot (גרסה 20+):
+
+python
+Copy
+Edit
+# src/bot.py
+import os
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("היי! אני אנהל עבורך את החנות. איך אפשר לעזור?")
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_text = update.message.text
+    # כאן נקרא לסוכן הראשי (Orchestrator) כדי לעבד את הטקסט ולקבל תשובה.
+    response = "זאת תשובה בסיסית כרגע."  # Placeholder
+    await update.message.reply_text(response)
+
+def create_bot():
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    return app
+זה שלד ראשוני. בהמשך נרחיב את handle_message כך שיזעיק את ה-Orchestrator Agent.
+
+5. סוכן ראשי ראשוני (orchestrator.py)
+ניצור שלד שיקבל טקסט מהמשתמש ויחזיר "מה לעשות". כרגע הוא לא באמת מפעיל סוכן LangChain מתקדם, אלא רק POC:
+
+python
+Copy
+Edit
+# src/agents/orchestrator.py
+
+class OrchestratorAgent:
+    def __init__(self):
+        # אם צריך, אפשר לאתחל חיבורים לסוכנים אחרים כאן
+        pass
+
+    def handle_user_message(self, text: str) -> str:
+        """
+        לוגיקה ראשונית כדי לטפל בטקסט מהמשתמש.
+        בהמשך נוסיף LangChain Agents וכלים.
+        """
+        if "מכירות" in text:
+            return "אני מזהה שאתה מתעניין בדוחות מכירות. (בקרוב אקרא לסוכן WooCommerce)"
+        elif "שלום" in text:
+            return "שלום גם לך! מה תרצה לעשות בחנות?"
+        else:
+            return "לא זיהיתי פעולה ספציפית, אבל בהמשך אכיר יותר פקודות."
+6. חיבור הסוכן הראשי לבוט (main.py)
+בשלב הזה, ב-main.py נבצע:
+
+טעינת משתני הסביבה (dotenv) אם צריך.
+יצירת מופע של OrchestratorAgent.
+יצירת מופע של הבוט.
+הרצת הבוט.
+python
+Copy
+Edit
+# src/main.py
+import os
+from dotenv import load_dotenv
+from bot import create_bot
+from agents.orchestrator import OrchestratorAgent
+
+def main():
+    load_dotenv()  # טוען משתני סביבה מ-.env
+    orchestrator = OrchestratorAgent()
+    bot_app = create_bot()
+
+    # איך נחבר את orchestrator לבוט?
+    # דרך handle_message ב-bot.py, נעביר את orchestrator כפרמטר
+
+    # לדוגמה: אפשר להפוך את create_bot לעבור orchestrator:
+    # bot_app = create_bot(orchestrator)
+
+    # אבל לעת עתה, נעשה משהו בסיסי. נעדכן ב-bot.py:
+
+    bot_app.run_polling()
+
+if __name__ == "__main__":
+    main()
+שינוי קטן ב-bot.py כדי להעביר orchestrator
+אפשר לערוך את create_bot כך:
+
+python
+Copy
+Edit
+# bot.py
+from agents.orchestrator import OrchestratorAgent
+
+orchestrator = OrchestratorAgent()
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_text = update.message.text
+    response = orchestrator.handle_user_message(user_text)
+    await update.message.reply_text(response)
+באופן אידאלי, מעבירים את orchestrator כפרמטר, אבל בשביל POC אפשר כך.
+
+7. הרצה ובדיקה
+וודא ששמת ב-.env את TELEGRAM_BOT_TOKEN.
+הרץ מתוך ultimate_store_manager:
+bash
+Copy
+Edit
+python src/main.py
+פתח את טלגרם, /start עם הבוט שלך ובדוק אם הבוט מגיב.
+נסה לכתוב "המכירות שלי" ותראה את ההודעה שהסוכן הראשי מחזיר.
+8. הרחבת הסוכן עם LangChain ו-Tools (בהמשך)
+בשלב הבא תוכל:
+
+להוסיף ל-orchestrator שימוש ב-LangChain Agent.
+ליצור "Tool" שמייצג את היכולת לשאול את WooCommerce API (לשלוף נתוני מכירות, מלאי, וכו').
+לחבר את זה לפרומפט חכם, כך שהסוכן יבין טבעית מה המשתמש מבקש ויקרא ל-Tool הנכון.
+דוגמה קצרה להמחשה (רק כרעיון, לא קוד מלא):
+
+python
+Copy
+Edit
+# agents/woocommerce_agent.py
+import requests
+import os
+
+WC_URL = os.getenv("WC_STORE_URL")
+WC_CONSUMER_KEY = os.getenv("WC_CONSUMER_KEY")
+WC_CONSUMER_SECRET = os.getenv("WC_CONSUMER_SECRET")
+
+def get_sales_report():
+    # קריאת API אמיתית לוורדפרס/ווקומרס
+    # לדוגמה: GET /wp-json/wc/v3/reports/sales?...
+    # מצריך credentials בסיסיות
+    resp = requests.get(
+        f"{WC_URL}/wp-json/wc/v3/reports/sales",
+        auth=(WC_CONSUMER_KEY, WC_CONSUMER_SECRET)
+    )
+    if resp.status_code == 200:
+        return resp.json()
+    else:
+        return {"error": resp.text}
+ואז ב-Orchestrator (או ב-LangChain Tool) תקרא לפונקציה get_sales_report() כשתזהה שהמשתמש מבקש "דוחות מכירות".
+
+סיכום השלב הראשון
+הגדרת פרויקט – תיקייה + requirements.txt.
+יצירת מבנה קוד בסיסי – bot.py, orchestrator.py, main.py.
+חיבור בוט טלגרם לסוכן – כדי שתהיה אינטראקציה ראשונית.
+הרצה מקומית – בדיקה שהכל עובד.
+הוספת Agent אמיתי – בשלב הבא נכנסים לקוד מתקדם יותר: הוספת LangChain Agent, הגדרת Tools, ועוד.
+כך תוכל לפעול בצעדים קטנים: קודם לוודא שהבוט מגיב, ואז לשלב בהדרגה את כל ההיגיון של הסוכן, ה-Tools, והחיבור ל-WordPress/ווקומרס.
+
+
+חלק ראשון של הוראות הושלם 
+
+
+
+
+חלק הוראות שני 
