@@ -3,331 +3,61 @@ Orchestrator agent that coordinates between user requests and various specialize
 """
 
 import json
-from typing import Dict, Any, Optional
-import requests
 import time
-from dataclasses import dataclass
+import logging
+import aiohttp
+from typing import Dict, Any, Optional, Tuple, List
 from datetime import datetime
 from utils import get_logger
 from utils.cache_manager import SimpleCache
 from utils.embeddings_manager import EmbeddingsManager
-import aiohttp
-import asyncio
+from utils.cache import ResponseCache
+from utils.metrics import PerformanceMetrics
 
-# יצירת לוגר ייעודי ל-Orchestrator
+# יצירת לוגר
 logger = get_logger(__name__)
-
-@dataclass
-class PerformanceMetrics:
-    """מחלקה לשמירת מדדי ביצועים"""
-    total_time: float = 0.0
-    cache_lookup_time: float = 0.0
-    api_call_time: float = 0.0
-    cache_hit: bool = False
-    attempt_count: int = 0
-    response_length: int = 0
-    task_type: str = ""
-    timestamp: datetime = datetime.now()
-
-class TaskType:
-    """סוגי משימות אפשריים"""
-    PRODUCT_INFO = "product_info"
-    ORDER_STATUS = "order_status"
-    SALES_REPORT = "sales_report"
-    CUSTOMER_SERVICE = "customer_service"
-    GENERAL_QUERY = "general_query"
-
-    @staticmethod
-    def get_prompt_params(task_type: str) -> Dict[str, Any]:
-        """פרמטרים מותאמים למודל לפי סוג המשימה"""
-        base_params = {
-            "model": "deepseek-chat",
-            "temperature": 0.3,
-            "max_tokens": 500,
-            "top_p": 0.9
-        }
-        
-        task_params = {
-            TaskType.PRODUCT_INFO: {"temperature": 0.2, "max_tokens": 500},
-            TaskType.ORDER_STATUS: {"temperature": 0.1, "max_tokens": 500},
-            TaskType.SALES_REPORT: {"temperature": 0.2, "max_tokens": 500},
-            TaskType.CUSTOMER_SERVICE: {"temperature": 0.3, "max_tokens": 500},
-            TaskType.GENERAL_QUERY: {"temperature": 0.3, "max_tokens": 500}
-        }
-        
-        return {**base_params, **task_params.get(task_type, {})}
 
 class OrchestratorAgent:
     def __init__(self, deepseek_api_key: str):
-        """Initialize the orchestrator with necessary components."""
+        """אתחול הסוכן"""
         self.api_key = deepseek_api_key
         self.api_url = "https://api.deepseek.com/v1/chat/completions"
-        self.conversation_history = []
-        self.max_retries = 5
+        self.embeddings_manager = EmbeddingsManager()
+        self.cache = SimpleCache(ttl=3600, maxsize=1000)
+        self.performance_metrics = []
+        self.conversation_history = {}  # מזהה שיחה -> רשימת הודעות
+        self.max_retries = 3
         self.timeout = 30
         
-        # יצירת מטמון פשוט
-        self.cache = SimpleCache(ttl=3600, maxsize=1000)
-        
-        # ניקוי המטמון בהתחלה
-        self.cache.clear()
-        logger.info("המטמון נוקה בהתחלה")
-        
-        # מטמון למדדי ביצועים
-        self.performance_metrics = []
-        
-        # יצירת מנהל embeddings
-        self.embeddings_manager = EmbeddingsManager()
-        
-        # הגדרת פרומפט בסיסי למערכת
-        self.base_system_prompt = """אני עוזר חכם לניהול חנות אונליין 🏪
-
-תפקידי:
-1. לספק מידע מקצועי על ניהול חנות אונליין
-2. לתת המלצות וטיפים מעשיים לשיפור המכירות
-3. לענות על שאלות בנושאי:
-   • ניהול מוצרים ומלאי
-   • שיווק ופרסום
-   • שירות לקוחות
-   • אופטימיזציה וביצועים
-   • מגמות בשוק
-
-חשוב לציין:
-- אני אתן תשובות מקצועיות ומעשיות
-- אם נשאל על נתונים ספציפיים מהחנות, אציין שזה עדיין לא זמין
-- אתמקד במתן ערך גם בלי גישה למידע בזמן אמת
-
-ענה בצורה:
-✓ מקצועית ומדויקת
-✓ ידידותית ומובנת
-✓ עם דוגמאות מעשיות
-✓ עם אימוג'ים מתאימים"""
-
         logger.info(
-            "מאתחל את ה-Orchestrator",
-            extra={
-                "api_url": self.api_url,
-                "api_key_length": len(self.api_key) if self.api_key else 0,
-                "timeout": self.timeout,
-                "max_retries": self.max_retries,
-                "cache_ttl": 3600,
-                "cache_maxsize": 1000
-            }
+            "סוכן אורקסטרטור אותחל",
+            extra={"api_key_length": len(deepseek_api_key) if deepseek_api_key else 0}
         )
+
+    async def _call_llm(self, messages: List[Dict[str, str]]) -> str:
+        """
+        קריאה ל-DeepSeek API
         
-        # הגדרת פרומפטים לפי סוג משימה
-        self.task_prompts = {
-            TaskType.PRODUCT_INFO: """עוזר חנות חכם 🏪
-תפקידך:
-• מידע על מוצרים 📦
-• מחירים ומלאי 💰
-• המלצות קנייה 🛍️
-
-ענה בצורה ידידותית וברורה עם אימוג'ים מתאימים.""",
-
-            TaskType.ORDER_STATUS: """עוזר חנות חכם 🏪
-תפקידך:
-• מעקב הזמנות 📦
-• סטטוס משלוחים 🚚
-• עדכוני זמנים 📅
-
-ענה בצורה מדויקת וברורה עם אימוג'ים מתאימים.""",
-
-            TaskType.SALES_REPORT: """עוזר חנות חכם 🏪
-תפקידך:
-• ניתוח מכירות 📊
-• מגמות והמלצות 📈
-• תובנות עסקיות 💡
-
-ענה בצורה מקצועית וברורה עם אימוג'ים מתאימים.""",
-
-            TaskType.CUSTOMER_SERVICE: """עוזר חנות חכם 🏪
-תפקידך:
-• פתרון בעיות ⚡
-• שירות לקוחות 🤝
-• תמיכה טכנית 🛠️
-
-ענה בצורה אמפתית וברורה עם אימוג'ים מתאימים.""",
-
-            TaskType.GENERAL_QUERY: """עוזר חנות חכם 🏪
-
-אני כאן לעזור לך בניהול החנות שלך! 
-
-יכולות נוכחיות:
-• מתן מידע והסברים על ניהול חנות אונליין 📚
-• המלצות לשיפור המכירות והשיווק 💡
-• תשובות לשאלות נפוצות בניהול חנות 💬
-• טיפים מקצועיים לאופטימיזציה 🎯
-• הסברים על מושגים בתחום המסחר האלקטרוני 🌐
-
-בקרוב אוכל גם:
-• להציג נתונים בזמן אמת מהחנות 📊
-• לבצע פעולות ניהול ישירות 🛠️
-• לנתח מגמות ולתת תובנות מבוססות נתונים 📈
-
-אשמח לענות על כל שאלה ולעזור בכל נושא הקשור לניהול החנות שלך!
-
-חשוב לציין: כרגע אני בשלבי פיתוח, ולכן חלק מהיכולות המתקדמות עדיין אינן זמינות. אני אעדכן אותך כשיכולות חדשות יתווספו!
-
-ענה בצורה מקצועית, ידידותית וברורה."""
-        }
-
-    def _identify_task_type(self, message: str) -> str:
-        """זיהוי פשוט של סוג המשימה לפי מילות מפתח"""
-        message_lower = message.lower()
-        
-        if any(word in message_lower for word in ["מחיר", "מוצר", "פריט", "קטלוג"]):
-            return TaskType.PRODUCT_INFO
-        elif any(word in message_lower for word in ["הזמנה", "משלוח", "סטטוס"]):
-            return TaskType.ORDER_STATUS
-        elif any(word in message_lower for word in ["מכירות", "דוח", "הכנסות"]):
-            return TaskType.SALES_REPORT
-        elif any(word in message_lower for word in ["בעיה", "תלונה", "שירות"]):
-            return TaskType.CUSTOMER_SERVICE
+        Args:
+            messages: רשימת הודעות בפורמט של DeepSeek
             
-        return TaskType.GENERAL_QUERY
-
-    def _create_messages(self, user_message: str) -> list:
-        """יצירת רשימת ההודעות לשליחה ל-API"""
-        task_type = self._identify_task_type(user_message)
-        system_prompt = self.task_prompts.get(task_type, self.base_system_prompt)
-        
-        messages = [
-            {"role": "system", "content": system_prompt},
-            *self.conversation_history[-5:],  # רק 5 ההודעות האחרונות
-            {"role": "user", "content": user_message}
-        ]
-        
-        return messages
-
-    async def handle_user_message(self, message: str, conversation_id: str = None) -> str:
-        """Process user message and return appropriate response."""
-        metrics = PerformanceMetrics()
-        start_time = time.time()
-        
-        try:
-            if not conversation_id:
-                logger.warning("לא התקבל מזהה שיחה, משתמש במזהה ברירת מחדל")
-                conversation_id = "default"
-            
-            # בדיקה במטמון
-            cache_start = time.time()
-            cached_response, is_cached = self.cache.get(message, conversation_id)
-            metrics.cache_lookup_time = time.time() - cache_start
-            
-            if cached_response:
-                metrics.cache_hit = True
-                logger.info(
-                    "נמצאה תשובה במטמון (Cache Hit)",
-                    extra={
-                        "conversation_id": conversation_id,
-                        "response_length": len(cached_response),
-                        "cache_lookup_time": metrics.cache_lookup_time
-                    }
-                )
-                metrics.response_length = len(cached_response)
-                metrics.total_time = time.time() - start_time
-                self.performance_metrics.append(metrics)
-                return cached_response
-
-            # חיפוש בשאלות נפוצות
-            faq_matches = self.embeddings_manager.find_similar_questions(message)
-            if faq_matches:
-                best_match = faq_matches[0]  # קבלת ההתאמה הטובה ביותר
-                logger.info(
-                    "נמצאה תשובה ב-FAQ",
-                    extra={
-                        "conversation_id": conversation_id,
-                        "message": message,
-                        "question": best_match[0],
-                        "similarity_score": best_match[2]
-                    }
-                )
-                # שמירה במטמון
-                self.cache.set(message, best_match[1], conversation_id)
-                return best_match[1]
-
-            # זיהוי סוג המשימה
-            task_type = self._identify_task_type(message)
-            metrics.task_type = task_type
-            
-            # הוספת ההודעה להיסטוריה
-            self.conversation_history.append({"role": "user", "content": message})
-            
-            # לוג מפורט על הפרומפט
-            logger.debug(
-                "פרטים על הפרומפט",
-                extra={
-                    "conversation_id": conversation_id,
-                    "system_prompt_length": len(self.base_system_prompt),
-                    "user_message_length": len(message),
-                    "history_count": len(self.conversation_history),
-                    "task_type": task_type
-                }
-            )
-
-            logger.info(
-                "לא נמצאה תשובה במטמון (Cache Miss)",
-                extra={
-                    "conversation_id": conversation_id,
-                    "task_type": task_type,
-                    "cache_lookup_time": metrics.cache_lookup_time
-                }
-            )
-
-            # קבלת הפרמטרים לפי סוג המשימה
-            task_params = TaskType.get_prompt_params(task_type)
-            
-            # יצירת הפרומפט המלא
-            messages = self._create_messages(message)
-            
-            # שליחת הבקשה ל-API
-            api_start = time.time()
-            assistant_message = await self._make_api_request(
-                messages, 
-                task_params,
-                metrics
-            )
-            metrics.api_call_time = time.time() - api_start
-            metrics.response_length = len(assistant_message)
-
-            # שמירה במטמון
-            self.cache.set(message, assistant_message, conversation_id)
-            
-            metrics.total_time = time.time() - start_time
-            self.performance_metrics.append(metrics)
-            
-            return assistant_message
-            
-        except Exception as e:
-            logger.error(
-                "שגיאה בטיפול בהודעה",
-                extra={
-                    "conversation_id": conversation_id,
-                    "error": str(e),
-                    "message": message,
-                    "duration": time.time() - start_time
-                }
-            )
-            metrics.total_time = time.time() - start_time
-            self.performance_metrics.append(metrics)
-            return "מצטער, נתקלתי בבעיה. אנא נסה שוב או נסח את השאלה אחרת."
-
-    async def _make_api_request(self, messages: list, task_params: dict, metrics: PerformanceMetrics) -> str:
-        """שליחת בקשה ל-API"""
+        Returns:
+            התשובה מהמודל
+        """
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
         
         data = {
+            "model": "deepseek-chat",
             "messages": messages,
-            **task_params
+            "temperature": 0.7,
+            "max_tokens": 1000
         }
         
         for attempt in range(self.max_retries):
             try:
-                metrics.attempt_count += 1
                 async with aiohttp.ClientSession() as session:
                     async with session.post(
                         self.api_url,
@@ -350,17 +80,8 @@ class OrchestratorAgent:
                             )
                             if attempt == self.max_retries - 1:
                                 raise Exception(f"API error: {error_text}")
-                            await asyncio.sleep(2 ** attempt)  # exponential backoff
+                            await asyncio.sleep(2 ** attempt)
                             
-            except asyncio.TimeoutError:
-                logger.error(
-                    "timeout בקריאה ל-API",
-                    extra={"attempt": attempt + 1}
-                )
-                if attempt == self.max_retries - 1:
-                    raise
-                await asyncio.sleep(2 ** attempt)
-                
             except Exception as e:
                 logger.error(
                     "שגיאה בקריאה ל-API",
@@ -374,6 +95,322 @@ class OrchestratorAgent:
                     raise
                 await asyncio.sleep(2 ** attempt)
 
+    def _get_conversation_context(self, conversation_id: str, limit: int = 5) -> str:
+        """
+        קבלת הקונטקסט של השיחה
+        
+        Args:
+            conversation_id: מזהה השיחה
+            limit: כמה הודעות אחרונות לכלול
+            
+        Returns:
+            מחרוזת המתארת את הקונטקסט
+        """
+        if conversation_id not in self.conversation_history:
+            return ""
+            
+        history = self.conversation_history[conversation_id][-limit:]
+        context = "\nהיסטוריית השיחה האחרונה:\n\n"
+        
+        # מעקב אחר נושאים
+        topics = []
+        current_topic = None
+        last_user_question = None
+        
+        for i, (role, content) in enumerate(history, 1):
+            # זיהוי נושא השיחה
+            if role == "משתמש":
+                last_user_question = content
+                # בדיקה אם ההודעה מתייחסת להודעה קודמת
+                if len(content.split()) <= 5 and not any(kw in content.lower() for category, keywords in CATEGORY_KEYWORDS.items() for kw in keywords):
+                    # זו כנראה תגובה קצרה להודעה קודמת
+                    if current_topic:
+                        topics.append(current_topic)
+                else:
+                    # חיפוש נושא חדש
+                    for category, keywords in CATEGORY_KEYWORDS.items():
+                        if any(kw in content.lower() for kw in keywords):
+                            current_topic = category
+                            topics.append(category)
+                            break
+            
+            # הוספת ההודעה עם תיאור ההקשר
+            context += f"{role}: {content}\n"
+            if current_topic:
+                context += f"(נושא: {current_topic})\n"
+            context += "\n"
+        
+        # הוספת סיכום הקשר
+        if topics:
+            main_topic = max(set(topics), key=topics.count)
+            context += f"\nנושא עיקרי בשיחה: {main_topic}\n"
+            if last_user_question:
+                context += f"שאלה אחרונה: {last_user_question}\n"
+            
+        return context
+
+    def _create_messages(self, user_message: str, conversation_id: Optional[str] = None) -> List[Dict[str, str]]:
+        """יצירת רשימת ההודעות לשליחה ל-API"""
+        
+        # קבלת הקונטקסט של השיחה
+        context = self._get_conversation_context(conversation_id) if conversation_id else ""
+        
+        # הגדרת הודעת המערכת עם דגש על הקשר השיחה
+        system_message = {
+            "role": "system",
+            "content": f"""אתה עוזר מקצועי לניהול חנות אי-קומרס המתמחה ב-WooCommerce.
+תפקידך לסייע למנהלי חנויות בכל הקשור לניהול החנות שלהם.
+
+כללי מענה חשובים:
+1. תמיד תן תשובות מעשיות וברורות
+2. אם השאלה לא ברורה, שאל שאלת הבהרה ספציפית
+3. אם השאלה קצרה, הבן אותה מתוך ההקשר של השיחה
+4. תמיד התייחס לנושא האחרון שדובר עליו אם אין נושא חדש
+5. הצע דוגמאות מעשיות ומספרים
+
+תחומי המומחיות שלך:
+🛍️ ניהול מוצרים והמלאי
+💰 מחירים וקופונים
+📊 ניתוח נתונים ודוחות
+🚚 משלוחים והזמנות
+👥 שירות לקוחות
+📱 שיווק ופרסום
+
+היסטוריית השיחה:
+{context}
+
+זכור: 
+- אתה מומחה לניהול חנות, עליך לתת תשובות מקצועיות ומעשיות
+- אם המשתמש מבקש מידע נוסף או הרחבה, התייחס לנושא האחרון שדובר עליו
+- תמיד הצע דרכים יצירתיות ומעשיות ליישום
+- אם אתה לא בטוח במשהו, שאל שאלת הבהרה"""
+        }
+        
+        # הוספת הודעת המשתמש
+        user_message = {
+            "role": "user",
+            "content": user_message
+        }
+        
+        return [system_message, user_message]
+
+    async def handle_message(self, message: str, conversation_id: Optional[str] = None) -> str:
+        """טיפול בהודעת משתמש"""
+        start_time = time.time()
+        metrics = PerformanceMetrics()
+        
+        try:
+            # בדיקה האם צריך הבהרה
+            needs_clarification, clarification_question = await self._needs_clarification(message)
+            if needs_clarification and clarification_question:
+                logger.info(
+                    "נדרשת הבהרה לשאלה",
+                    extra={
+                        "original_message": message,
+                        "clarification_question": clarification_question
+                    }
+                )
+                if conversation_id:
+                    self._update_conversation_history(conversation_id, message, clarification_question)
+                return clarification_question
+
+            if not conversation_id:
+                logger.warning("לא התקבל מזהה שיחה, משתמש במזהה ברירת מחדל")
+                conversation_id = "default"
+            
+            # בדיקה במטמון
+            cache_start = time.time()
+            cached_response = self.cache.get(message, conversation_id)
+            metrics.cache_lookup_time = time.time() - cache_start
+            
+            if cached_response[0]:
+                metrics.cache_hit = True
+                logger.info(
+                    "נמצאה תשובה במטמון (Cache Hit)",
+                    extra={
+                        "conversation_id": conversation_id,
+                        "response_length": len(cached_response[0]),
+                        "cache_lookup_time": metrics.cache_lookup_time
+                    }
+                )
+                metrics.response_length = len(cached_response[0])
+                metrics.total_time = time.time() - start_time
+                self._update_conversation_history(conversation_id, message, cached_response[0])
+                self.performance_metrics.append(metrics)
+                return cached_response[0]
+
+            # חיפוש בשאלות נפוצות
+            faq_matches = self.embeddings_manager.find_similar_questions(message)
+            if faq_matches:
+                best_match = faq_matches[0]  # קבלת ההתאמה הטובה ביותר
+                logger.info(
+                    "נמצאה תשובה ב-FAQ",
+                    extra={
+                        "conversation_id": conversation_id,
+                        "message": message,
+                        "question": best_match[0],
+                        "similarity_score": best_match[2]
+                    }
+                )
+
+                # יצירת פרומפט למודל השפה
+                context = self._get_conversation_context(conversation_id)
+                prompt = f"""אתה מומחה מקצועי לניהול חנויות אונליין, עם התמחות ספציפית ב-WooCommerce.
+תפקידך לספק מידע מדויק ופרקטי בנושאי ניהול חנות.
+
+להלן מידע רלוונטי מה-FAQ שלנו בנושא השאלה:
+{best_match[1]}
+
+הקשר השיחה:
+{context}
+
+בהתבסס על המידע הזה, אנא:
+1. התאם את התשובה להקשר הספציפי של השאלה
+2. הוסף דוגמאות קונקרטיות ומספרים במידת האפשר
+3. הצע צעדים מעשיים ליישום
+4. שלב טיפים מקצועיים רלוונטיים
+5. הצע שאלות המשך אם יש צורך בהבהרות
+
+חשוב:
+- התמקד אך ורק בניהול החנות
+- תן תשובות מעשיות שאפשר ליישם מיד
+- השתמש במונחים מקצועיים אך הסבר אותם
+- הצע תמיד את העזרה שלך להמשך
+
+שאלת המשתמש: {message}"""
+
+                # קריאה ל-LLM
+                try:
+                    messages = [
+                        {"role": "system", "content": prompt},
+                        {"role": "user", "content": message}
+                    ]
+                    llm_response = await self._call_llm(messages)
+                    # שמירה במטמון
+                    self.cache.set(message, llm_response, conversation_id)
+                    self._update_conversation_history(conversation_id, message, llm_response)
+                    return llm_response
+                except Exception as e:
+                    logger.error(
+                        "שגיאה בקריאה ל-LLM",
+                        extra={
+                            "error": str(e),
+                            "conversation_id": conversation_id
+                        }
+                    )
+                    # במקרה של שגיאה, נחזיר את התשובה המקורית מה-FAQ
+                    self.cache.set(message, best_match[1], conversation_id)
+                    self._update_conversation_history(conversation_id, message, best_match[1])
+                    return best_match[1]
+
+            # יצירת הודעות למודל
+            messages = self._create_messages(message, conversation_id)
+            
+            # שליחת בקשה ל-API
+            try:
+                answer = await self._call_llm(messages)
+                
+                # שמירה במטמון
+                self.cache.set(message, answer, conversation_id)
+                
+                # עדכון מטריקות
+                metrics.response_length = len(answer)
+                metrics.total_time = time.time() - start_time
+                self.performance_metrics.append(metrics)
+                
+                # עדכון היסטוריית שיחה
+                self._update_conversation_history(conversation_id, message, answer)
+                
+                return answer
+                
+            except Exception as e:
+                logger.error(
+                    "שגיאה בשליחת בקשה ל-API",
+                    extra={
+                        "error": str(e),
+                        "conversation_id": conversation_id
+                    }
+                )
+                raise
+                
+        except Exception as e:
+            logger.error(
+                "שגיאה בטיפול בהודעה",
+                extra={
+                    "error": str(e),
+                    "message": message,
+                    "conversation_id": conversation_id
+                }
+            )
+            raise
+
+    async def _needs_clarification(self, message: str) -> Tuple[bool, Optional[str]]:
+        """
+        בדיקה האם השאלה דורשת הבהרה
+        
+        Args:
+            message: הודעת המשתמש
+            
+        Returns:
+            טאפל של (האם צריך הבהרה, שאלת ההבהרה)
+        """
+        try:
+            # יצירת פרומפט לבדיקת הבהרה
+            messages = [
+                {
+                    "role": "system",
+                    "content": """בדוק האם השאלה דורשת הבהרה נוספת כדי לתת תשובה מדויקת ומועילה.
+אם כן, החזר שאלת הבהרה.
+אם לא, החזר "לא".
+
+דוגמאות:
+1. שאלה: "איך ליצור קופון?"
+   תשובה: "האם הקופון מיועד למוצר ספציפי או לכל החנות?"
+
+2. שאלה: "מה המכירות שלי?"
+   תשובה: "לאיזו תקופה תרצה לראות את נתוני המכירות?"
+
+3. שאלה: "איך להוסיף מוצר חדש?"
+   תשובה: "לא"
+"""
+                },
+                {
+                    "role": "user",
+                    "content": f"שאלת המשתמש: {message}"
+                }
+            ]
+            
+            # קריאה ל-LLM
+            response = await self._call_llm(messages)
+            
+            # אם התשובה היא "לא", אין צורך בהבהרה
+            if response.strip().lower() == "לא":
+                return False, None
+                
+            return True, response.strip()
+            
+        except Exception as e:
+            logger.error(
+                "שגיאה בבדיקת הצורך בהבהרה",
+                extra={"error": str(e)}
+            )
+            return False, None
+
+    def _update_conversation_history(self, conversation_id: str, message: str, response: str) -> None:
+        """
+        עדכון היסטוריית השיחה
+        
+        Args:
+            conversation_id: מזהה השיחה
+            message: הודעת המשתמש
+            response: תשובת המערכת
+        """
+        if conversation_id not in self.conversation_history:
+            self.conversation_history[conversation_id] = []
+            
+        self.conversation_history[conversation_id].append(("משתמש", message))
+        self.conversation_history[conversation_id].append(("מערכת", response))
+
     def get_performance_stats(self) -> Dict[str, Any]:
         """מחזיר סטטיסטיקות ביצועים"""
         if not self.performance_metrics:
@@ -384,16 +421,6 @@ class OrchestratorAgent:
         avg_total_time = sum(m.total_time for m in self.performance_metrics) / total_requests
         avg_api_time = sum(m.api_call_time for m in self.performance_metrics if not m.cache_hit) / (total_requests - cache_hits) if total_requests > cache_hits else 0
         
-        # ניתוח לפי סוג משימה
-        task_type_stats = {}
-        for task_type in set(m.task_type for m in self.performance_metrics):
-            task_metrics = [m for m in self.performance_metrics if m.task_type == task_type]
-            task_type_stats[task_type] = {
-                "count": len(task_metrics),
-                "avg_time": sum(m.total_time for m in task_metrics) / len(task_metrics),
-                "cache_hits": sum(1 for m in task_metrics if m.cache_hit)
-            }
-        
         return {
             "total_requests": total_requests,
             "cache_hits": cache_hits,
@@ -401,6 +428,5 @@ class OrchestratorAgent:
             "avg_total_time": avg_total_time,
             "avg_api_time": avg_api_time,
             "avg_response_length": sum(m.response_length for m in self.performance_metrics) / total_requests,
-            "task_type_stats": task_type_stats,
             "cache_stats": self.cache.get_stats()
         } 
