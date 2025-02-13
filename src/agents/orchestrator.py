@@ -10,6 +10,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from utils import get_logger
 from utils.cache_manager import SimpleCache
+from utils.embeddings_manager import EmbeddingsManager
+import aiohttp
+import asyncio
 
 # יצירת לוגר ייעודי ל-Orchestrator
 logger = get_logger(__name__)
@@ -40,17 +43,16 @@ class TaskType:
         base_params = {
             "model": "deepseek-chat",
             "temperature": 0.3,
-            "max_tokens": 200,
-            "top_p": 0.9,
-            "presence_penalty": 0.1
+            "max_tokens": 500,
+            "top_p": 0.9
         }
         
         task_params = {
-            TaskType.PRODUCT_INFO: {"temperature": 0.2, "max_tokens": 150},
-            TaskType.ORDER_STATUS: {"temperature": 0.1, "max_tokens": 100},
-            TaskType.SALES_REPORT: {"temperature": 0.4, "max_tokens": 250},
-            TaskType.CUSTOMER_SERVICE: {"temperature": 0.5, "max_tokens": 200},
-            TaskType.GENERAL_QUERY: {"temperature": 0.3, "max_tokens": 150}
+            TaskType.PRODUCT_INFO: {"temperature": 0.2, "max_tokens": 500},
+            TaskType.ORDER_STATUS: {"temperature": 0.1, "max_tokens": 500},
+            TaskType.SALES_REPORT: {"temperature": 0.2, "max_tokens": 500},
+            TaskType.CUSTOMER_SERVICE: {"temperature": 0.3, "max_tokens": 500},
+            TaskType.GENERAL_QUERY: {"temperature": 0.3, "max_tokens": 500}
         }
         
         return {**base_params, **task_params.get(task_type, {})}
@@ -67,8 +69,15 @@ class OrchestratorAgent:
         # יצירת מטמון פשוט
         self.cache = SimpleCache(ttl=3600, maxsize=1000)
         
+        # ניקוי המטמון בהתחלה
+        self.cache.clear()
+        logger.info("המטמון נוקה בהתחלה")
+        
         # מטמון למדדי ביצועים
         self.performance_metrics = []
+        
+        # יצירת מנהל embeddings
+        self.embeddings_manager = EmbeddingsManager()
         
         # הגדרת פרומפט בסיסי למערכת
         self.base_system_prompt = """אני עוזר חכם לניהול חנות אונליין 🏪
@@ -178,40 +187,42 @@ class OrchestratorAgent:
             
         return TaskType.GENERAL_QUERY
 
-    def handle_user_message(self, message: str) -> str:
+    def _create_messages(self, user_message: str) -> list:
+        """יצירת רשימת ההודעות לשליחה ל-API"""
+        task_type = self._identify_task_type(user_message)
+        system_prompt = self.task_prompts.get(task_type, self.base_system_prompt)
+        
+        messages = [
+            {"role": "system", "content": system_prompt},
+            *self.conversation_history[-5:],  # רק 5 ההודעות האחרונות
+            {"role": "user", "content": user_message}
+        ]
+        
+        return messages
+
+    async def handle_user_message(self, message: str, conversation_id: str = None) -> str:
         """Process user message and return appropriate response."""
         metrics = PerformanceMetrics()
         start_time = time.time()
         
         try:
-            # זיהוי סוג המשימה
-            task_type = self._identify_task_type(message)
-            metrics.task_type = task_type
-            
-            # הוספת ההודעה להיסטוריה
-            self.conversation_history.append({"role": "user", "content": message})
-            
-            logger.info(
-                "מתחיל לטפל בהודעת משתמש חדשה",
-                extra={
-                    "message_length": len(message),
-                    "conversation_history_length": len(self.conversation_history),
-                    "task_type": task_type
-                }
-            )
+            if not conversation_id:
+                logger.warning("לא התקבל מזהה שיחה, משתמש במזהה ברירת מחדל")
+                conversation_id = "default"
             
             # בדיקה במטמון
             cache_start = time.time()
-            cached_response, is_cached = self.cache.get(message)
+            cached_response, is_cached = self.cache.get(message, conversation_id)
             metrics.cache_lookup_time = time.time() - cache_start
             
             if cached_response:
                 metrics.cache_hit = True
                 logger.info(
-                    "נמצאה תשובה במטמון",
+                    "נמצאה תשובה במטמון (Cache Hit)",
                     extra={
+                        "conversation_id": conversation_id,
                         "response_length": len(cached_response),
-                        "task_type": task_type
+                        "cache_lookup_time": metrics.cache_lookup_time
                     }
                 )
                 metrics.response_length = len(cached_response)
@@ -219,160 +230,149 @@ class OrchestratorAgent:
                 self.performance_metrics.append(metrics)
                 return cached_response
 
-            # בחירת הפרומפט המתאים
-            if task_type in [TaskType.PRODUCT_INFO, TaskType.ORDER_STATUS, TaskType.SALES_REPORT]:
-                # שאלות שדורשות מידע מהחנות
-                system_message = f"""
-{self.base_system_prompt}
+            # חיפוש בשאלות נפוצות
+            faq_matches = self.embeddings_manager.find_similar_questions(message)
+            if faq_matches:
+                best_match = faq_matches[0]  # קבלת ההתאמה הטובה ביותר
+                logger.info(
+                    "נמצאה תשובה ב-FAQ",
+                    extra={
+                        "conversation_id": conversation_id,
+                        "message": message,
+                        "question": best_match[0],
+                        "similarity_score": best_match[2]
+                    }
+                )
+                # שמירה במטמון
+                self.cache.set(message, best_match[1], conversation_id)
+                return best_match[1]
 
-חשוב: אין לי כרגע גישה למידע בזמן אמת מהחנות.
-אני אסביר מה אפשר יהיה לעשות בקרוב ואתן טיפים כלליים בינתיים."""
-            else:
-                # שאלות כלליות או ייעוץ
-                system_message = self.base_system_prompt
-
-            # הכנת הבקשה
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
-            }
+            # זיהוי סוג המשימה
+            task_type = self._identify_task_type(message)
+            metrics.task_type = task_type
             
-            messages = [
-                {
-                    "role": "system",
-                    "content": system_message
-                },
-                {
-                    "role": "user",
-                    "content": message
+            # הוספת ההודעה להיסטוריה
+            self.conversation_history.append({"role": "user", "content": message})
+            
+            # לוג מפורט על הפרומפט
+            logger.debug(
+                "פרטים על הפרומפט",
+                extra={
+                    "conversation_id": conversation_id,
+                    "system_prompt_length": len(self.base_system_prompt),
+                    "user_message_length": len(message),
+                    "history_count": len(self.conversation_history),
+                    "task_type": task_type
                 }
-            ]
+            )
+
+            logger.info(
+                "לא נמצאה תשובה במטמון (Cache Miss)",
+                extra={
+                    "conversation_id": conversation_id,
+                    "task_type": task_type,
+                    "cache_lookup_time": metrics.cache_lookup_time
+                }
+            )
+
+            # קבלת הפרמטרים לפי סוג המשימה
+            task_params = TaskType.get_prompt_params(task_type)
             
-            data = {
-                "model": "deepseek-chat",
-                "messages": messages,
-                "temperature": 0.7,
-                "max_tokens": 500,
-                "stream": False
-            }
+            # יצירת הפרומפט המלא
+            messages = self._create_messages(message)
+            
+            # שליחת הבקשה ל-API
+            api_start = time.time()
+            assistant_message = await self._make_api_request(
+                messages, 
+                task_params,
+                metrics
+            )
+            metrics.api_call_time = time.time() - api_start
+            metrics.response_length = len(assistant_message)
 
-            # ניסיון עם מספר retries
-            for attempt in range(self.max_retries):
-                metrics.attempt_count = attempt + 1
-                try:
-                    logger.debug(
-                        f"ניסיון {attempt + 1} מתוך {self.max_retries}",
-                        extra={
-                            "attempt": attempt + 1,
-                            "task_type": task_type,
-                            "request_data": {
-                                "url": self.api_url,
-                                "headers": {**headers, "Authorization": "Bearer [HIDDEN]"},
-                                "data": data
-                            }
-                        }
-                    )
-                    
-                    logger.info(
-                        "שולח בקשה ל-DeepSeek API",
-                        extra={
-                            "attempt": attempt + 1,
-                            "task_type": task_type,
-                            "request_length": len(str(data)),
-                            "request_details": {
-                                "model": data["model"],
-                                "temperature": data["temperature"],
-                                "max_tokens": data["max_tokens"],
-                                "messages_count": len(data["messages"]),
-                                "system_message_length": len(data["messages"][0]["content"]),
-                                "user_message_length": len(data["messages"][1]["content"])
-                            }
-                        }
-                    )
-                    
-                    api_start = time.time()
-                    try:
-                        response = requests.post(
-                            self.api_url,
-                            headers=headers,
-                            json=data,
-                            timeout=self.timeout
-                        )
-                        response.raise_for_status()
-                    except requests.exceptions.RequestException as e:
-                        logger.error(
-                            "שגיאה בשליחת הבקשה ל-API",
-                            extra={
-                                "error": str(e),
-                                "status_code": getattr(e.response, 'status_code', None),
-                                "response_text": getattr(e.response, 'text', None)
-                            }
-                        )
-                        raise
-                    
-                    result = response.json()
-                    metrics.api_call_time = time.time() - api_start
-
-                    logger.info(
-                        "התקבל מענה מה-API",
-                        extra={
-                            "status_code": response.status_code,
-                            "response_time": metrics.api_call_time,
-                            "raw_response_length": len(response.text)
-                        }
-                    )
-                    
-                    assistant_message = result["choices"][0]["message"]["content"]
-                    metrics.response_length = len(assistant_message)
-                    
-                    logger.info(
-                        "התקבלה תשובה מ-DeepSeek API",
-                        extra={
-                            "response_length": len(assistant_message),
-                            "task_type": task_type,
-                            "attempt": attempt + 1
-                        }
-                    )
-                    
-                    # הוספת התשובה להיסטוריה
-                    self.conversation_history.append({"role": "assistant", "content": assistant_message})
-                    
-                    # שמירה במטמון
-                    self.cache.set(message, assistant_message)
-                    
-                    metrics.total_time = time.time() - start_time
-                    self.performance_metrics.append(metrics)
-                    
-                    return assistant_message
-                    
-                except requests.Timeout:
-                    logger.warning(f"Timeout בניסיון {attempt + 1}")
-                    if attempt == self.max_retries - 1:
-                        raise
-                    time.sleep(1)
-                    
-                except requests.RequestException as e:
-                    logger.error(
-                        f"שגיאת רשת בניסיון {attempt + 1}",
-                        extra={"error": str(e)}
-                    )
-                    if attempt == self.max_retries - 1:
-                        raise
-                    time.sleep(1)
-
-            raise Exception("כל הניסיונות נכשלו")
-
+            # שמירה במטמון
+            self.cache.set(message, assistant_message, conversation_id)
+            
+            metrics.total_time = time.time() - start_time
+            self.performance_metrics.append(metrics)
+            
+            return assistant_message
+            
         except Exception as e:
             logger.error(
                 "שגיאה בטיפול בהודעה",
                 extra={
+                    "conversation_id": conversation_id,
                     "error": str(e),
-                    "message": message
+                    "message": message,
+                    "duration": time.time() - start_time
                 }
             )
             metrics.total_time = time.time() - start_time
             self.performance_metrics.append(metrics)
             return "מצטער, נתקלתי בבעיה. אנא נסה שוב או נסח את השאלה אחרת."
+
+    async def _make_api_request(self, messages: list, task_params: dict, metrics: PerformanceMetrics) -> str:
+        """שליחת בקשה ל-API"""
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        data = {
+            "messages": messages,
+            **task_params
+        }
+        
+        for attempt in range(self.max_retries):
+            try:
+                metrics.attempt_count += 1
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        self.api_url,
+                        headers=headers,
+                        json=data,
+                        timeout=self.timeout
+                    ) as response:
+                        if response.status == 200:
+                            result = await response.json()
+                            return result["choices"][0]["message"]["content"]
+                        else:
+                            error_text = await response.text()
+                            logger.error(
+                                "שגיאה בקריאה ל-API",
+                                extra={
+                                    "status_code": response.status,
+                                    "error": error_text,
+                                    "attempt": attempt + 1
+                                }
+                            )
+                            if attempt == self.max_retries - 1:
+                                raise Exception(f"API error: {error_text}")
+                            await asyncio.sleep(2 ** attempt)  # exponential backoff
+                            
+            except asyncio.TimeoutError:
+                logger.error(
+                    "timeout בקריאה ל-API",
+                    extra={"attempt": attempt + 1}
+                )
+                if attempt == self.max_retries - 1:
+                    raise
+                await asyncio.sleep(2 ** attempt)
+                
+            except Exception as e:
+                logger.error(
+                    "שגיאה בקריאה ל-API",
+                    extra={
+                        "error_type": type(e).__name__,
+                        "error": str(e),
+                        "attempt": attempt + 1
+                    }
+                )
+                if attempt == self.max_retries - 1:
+                    raise
+                await asyncio.sleep(2 ** attempt)
 
     def get_performance_stats(self) -> Dict[str, Any]:
         """מחזיר סטטיסטיקות ביצועים"""

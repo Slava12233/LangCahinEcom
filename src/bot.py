@@ -130,7 +130,10 @@ class StoreManagerBot:
                 }
             )
             
-            response = self.orchestrator.handle_user_message(user_message)
+            response = await self.orchestrator.handle_user_message(
+                user_message,
+                str(update.effective_chat.id)
+            )
             
             logger.info(
                 "התקבלה תשובה מה-Orchestrator",
